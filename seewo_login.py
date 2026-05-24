@@ -18,6 +18,12 @@ try:
 except Exception:
     pass
 
+# ──
+# seewo_login.py — 希沃白板多账号自动登录工具
+# Copyright (c) 2026 Qin_zzq (Pro-Qin)
+# License: MIT (see LICENSE file)
+# ──
+
 # ── pyautogui ──
 pyautogui.FAILSAFE = True
 pyautogui.PAUSE = 0.3

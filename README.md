@@ -66,4 +66,4 @@ pip install pyinstaller
 pyinstaller --onefile --noconsole --name 希沃自动登录 seewo_login.py
 ```
 
-> Made by [Pro-Qin](https://github.com/Pro-Qin)
+> Made by [Pro-Qin](https://github.com/Pro-Qin) · MIT License · Copyright (c) 2026
