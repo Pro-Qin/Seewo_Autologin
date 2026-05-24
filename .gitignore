@@ -1,0 +1,14 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# 项目私有数据（含账号密码）
+seewo_accounts.json
+seewo_mode_settings.json
+seewo_coordinate_schemes.json
+seewo_settings.json
+
+# 工作区
+.workbuddy/
+nul
