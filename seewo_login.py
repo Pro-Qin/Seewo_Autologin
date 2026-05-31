@@ -1,3 +1,14 @@
+# ── 高 DPI 支持（必须在 tkinter import 之前） ──
+try:
+    import ctypes
+    # Per-Monitor DPI Aware (v2) — 适配 3K 175% 缩放及多屏高 DPI
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)
+except Exception:
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        pass
+
 import pyautogui
 import time
 import psutil
@@ -10,13 +21,6 @@ import os
 import sys
 import copy
 from pynput import mouse
-
-# ── 高 DPI 支持 ──
-try:
-    import ctypes
-    ctypes.windll.shcore.SetProcessDpiAwareness(1)
-except Exception:
-    pass
 
 # ──
 # seewo_login.py — 希沃白板多账号自动登录工具
@@ -59,6 +63,10 @@ DEFAULT_4K_COORDS = {
     "back_prepare":   {"x": 80,   "y": 2055, "desc": "进入个人版"},
 }
 
+# 默认等待时间（秒）— 每个坐标方案独立保存
+WAIT_LAUNCH_DEFAULT = 8.5
+WAIT_OPERATION_DEFAULT = 0.5
+
 # ── helpers ──
 def mask_phone(phone):
     if not phone or len(phone) < 7:
@@ -91,13 +99,22 @@ def save_mode_settings(settings):
         pass
 
 def load_coordinate_schemes():
-    default = {"active_scheme": "4k", "schemes": {"4k": copy.deepcopy(DEFAULT_4K_COORDS)}}
+    default = {"active_scheme": "4k", "schemes": {"4k": {
+        **copy.deepcopy(DEFAULT_4K_COORDS),
+        "wait_launch": WAIT_LAUNCH_DEFAULT,
+        "wait_operation": WAIT_OPERATION_DEFAULT,
+    }}}
     try:
         if os.path.exists(SCHEMES_FILE):
             with open(SCHEMES_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             for k, v in default.items():
                 data.setdefault(k, v)
+            # 向前兼容：为旧方案自动补全等待时间字段
+            for name in data.get("schemes", {}):
+                scheme = data["schemes"][name]
+                scheme.setdefault("wait_launch", WAIT_LAUNCH_DEFAULT)
+                scheme.setdefault("wait_operation", WAIT_OPERATION_DEFAULT)
             return data
         # 文件不存在：写入默认值
         data = dict(default)
@@ -148,9 +165,22 @@ class SeewoLoginApp:
         self.root.title("希沃自动登录")
         self.root.resizable(False, False)
 
+        # ── DPI 缩放补偿（适配 3K 175% 等高分屏） ──
+        try:
+            dpi = self.root.winfo_fpixels('1i')
+            if dpi > 100:  # 系统缩放 > 100%
+                self.root.tk.call('tk', 'scaling', dpi / 72.0)
+        except Exception:
+            pass
+        # 主题统一字体缩放
         self.style = ttk.Style()
         self.style.configure("TButton", font=("SimHei", 10))
-        self.style.configure("TLabel", font=("SimHei", 12))
+        self.style.configure("TLabel", font=("SimHei", 11))
+        self.style.configure("TCheckbutton", font=("SimHei", 10))
+        self.style.configure("TRadiobutton", font=("SimHei", 10))
+        self.style.configure("TSpinbox", font=("SimHei", 10))
+        self.style.configure("TEntry", font=("SimHei", 10))
+        self.style.configure("TNotebook.Tab", font=("SimHei", 10))
 
         self.account_data = load_account_data()
         if not self.account_data:
@@ -222,25 +252,25 @@ class SeewoLoginApp:
         rh = self.root.winfo_reqheight()
         sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
-        w = max(rw, 480) + 10
-        h = max(rh, 320) + 10
+        w = max(rw, 780) + 10
+        h = max(rh, 560) + 10
         x = max(0, sw // 8)
         y = max(0, sh // 8)
         self.root.geometry(f"{w}x{h}+{x}+{y}")
-        self.root.attributes("-topmost", True)
+        self.root.after(50, lambda: self.root.attributes("-topmost", True))
 
         # 切换 tab 时自适应尺寸
         notebook.bind("<<NotebookTabChanged>>", lambda e: self._fit_window())
 
     def _fit_window(self):
-        """自适应窗口大小到当前 tab 内容 + 微量间隙"""
+        """自适应窗口大小到当前 tab 内容 + 微量间隙（适配 3K 175%）"""
         self.root.update_idletasks()
         rw = self.root.winfo_reqwidth()
         rh = self.root.winfo_reqheight()
         sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
-        w = max(rw, 480) + 10
-        h = max(rh, 320) + 10
+        w = max(rw, 780) + 10
+        h = max(rh, 560) + 10
         x = max(0, sw // 8)
         y = max(0, sh // 8)
         self.root.geometry(f"{w}x{h}+{x}+{y}")
@@ -497,6 +527,9 @@ class SeewoLoginApp:
         self.scheme_canvas.create_window((0, 0), window=self.scheme_inner, anchor="nw")
         self.scheme_inner.bind("<Configure>", lambda e: self.scheme_canvas.configure(
             scrollregion=self.scheme_canvas.bbox("all")))
+        # 保证滚动区域最小宽度（防高 DPI 窄列挤压缩放文本）
+        self.scheme_inner.update_idletasks()
+        self.scheme_canvas.config(scrollregion=self.scheme_canvas.bbox("all"))
 
         self._populate_scheme_ui()
 
@@ -507,14 +540,45 @@ class SeewoLoginApp:
 
         active = self.scheme_var.get()  # 尊重用户下拉选择
         schemes = self.scheme_data["schemes"]
-        coords = schemes.get(active, schemes.get(self.scheme_data.get("active_scheme","4k"), {}))
+        scheme_dict = schemes.get(active, schemes.get(self.scheme_data.get("active_scheme","4k"), {}))
+        # 分离坐标键与等待时间键
+        TIME_KEYS = {"wait_launch", "wait_operation"}
+        coords = {k: v for k, v in scheme_dict.items() if k not in TIME_KEYS}
+        wait_launch_val = scheme_dict.get("wait_launch", WAIT_LAUNCH_DEFAULT)
+        wait_operation_val = scheme_dict.get("wait_operation", WAIT_OPERATION_DEFAULT)
 
         # 更新下拉框备选项（不覆盖用户选择）
         self.scheme_combo["values"] = list(schemes.keys())
 
-        # 表头
+        # ── 等待时间设置区 ──
+        time_frame = ttk.LabelFrame(self.scheme_inner, text="等待时间设置", padding="6")
+        time_frame.pack(fill=tk.X, pady=(0, 8))
+
+        row1 = ttk.Frame(time_frame)
+        row1.pack(fill=tk.X, pady=1)
+        ttk.Label(row1, text="启动等待(秒):", width=14, font=("SimHei", 10)).pack(side=tk.LEFT)
+        self.wait_launch_spin = ttk.Spinbox(
+            row1, from_=0.5, to=30, increment=0.5,
+            width=8, font=("SimHei", 10))
+        self.wait_launch_spin.set(str(wait_launch_val))
+        self.wait_launch_spin.pack(side=tk.LEFT, padx=5)
+        ttk.Label(row1, text="希沃启动后等待该时长再开始操作",
+                  font=("SimHei", 8), foreground="gray").pack(side=tk.LEFT, padx=(5, 0))
+
+        row2 = ttk.Frame(time_frame)
+        row2.pack(fill=tk.X, pady=1)
+        ttk.Label(row2, text="操作间隔(秒):", width=14, font=("SimHei", 10)).pack(side=tk.LEFT)
+        self.wait_operation_spin = ttk.Spinbox(
+            row2, from_=0.1, to=10, increment=0.1,
+            width=8, font=("SimHei", 10))
+        self.wait_operation_spin.set(str(wait_operation_val))
+        self.wait_operation_spin.pack(side=tk.LEFT, padx=5)
+        ttk.Label(row2, text="各自动步骤之间的停顿",
+                  font=("SimHei", 8), foreground="gray").pack(side=tk.LEFT, padx=(5, 0))
+
+        # ── 坐标表头 ──
         hdr = ttk.Frame(self.scheme_inner)
-        hdr.pack(fill=tk.X, pady=(5, 2))
+        hdr.pack(fill=tk.X, pady=(2, 2))
         ttk.Label(hdr, text="操作", width=18, font=("SimHei", 10, "bold")).pack(side=tk.LEFT)
         ttk.Label(hdr, text="X", width=8, font=("SimHei", 10, "bold")).pack(side=tk.LEFT)
         ttk.Label(hdr, text="Y", width=8, font=("SimHei", 10, "bold")).pack(side=tk.LEFT)
@@ -562,9 +626,12 @@ class SeewoLoginApp:
             return
         # 复制当前方案为模板
         active = self.scheme_var.get()
-        self.scheme_data["schemes"][name] = copy.deepcopy(
+        template = copy.deepcopy(
             self.scheme_data["schemes"].get(active, DEFAULT_4K_COORDS)
         )
+        template.setdefault("wait_launch", WAIT_LAUNCH_DEFAULT)
+        template.setdefault("wait_operation", WAIT_OPERATION_DEFAULT)
+        self.scheme_data["schemes"][name] = template
         save_coordinate_schemes(self.scheme_data)
         self.scheme_data["active_scheme"] = name
         self.scheme_combo["values"] = list(self.scheme_data["schemes"].keys())
@@ -613,19 +680,29 @@ class SeewoLoginApp:
         self.status_var.set(f"方案 [{name}] 已删除")
 
     def _save_scheme_coords(self):
-        """保存当前方案的坐标修改"""
+        """保存当前方案的坐标修改 及 等待时间"""
         active = self.scheme_var.get()
         if active not in self.scheme_data["schemes"]:
             return
-        coords = self.scheme_data["schemes"][active]
+        scheme = self.scheme_data["schemes"][active]
+        # 保存坐标
         for key, (x_entry, y_entry, _) in self._coord_entries.items():
             try:
-                coords[key]["x"] = int(x_entry.get())
-                coords[key]["y"] = int(y_entry.get())
+                scheme[key]["x"] = int(x_entry.get())
+                scheme[key]["y"] = int(y_entry.get())
             except ValueError:
                 pass
+        # 保存等待时间
+        try:
+            scheme["wait_launch"] = float(self.wait_launch_spin.get())
+        except ValueError:
+            pass
+        try:
+            scheme["wait_operation"] = float(self.wait_operation_spin.get())
+        except ValueError:
+            pass
         save_coordinate_schemes(self.scheme_data)
-        self.status_var.set(f"方案 [{active}] 坐标已保存")
+        self.status_var.set(f"方案 [{active}] 已保存")
 
     def _read_single_coord(self, key, x_entry, y_entry):
         """读取单个坐标：点击后等待下一次鼠标左键"""
@@ -712,7 +789,7 @@ class SeewoLoginApp:
 
         self.mode_dialog = tk.Toplevel(self.root)
         self.mode_dialog.title("选择操作模式")
-        self.mode_dialog.geometry("400x250")
+        self.mode_dialog.geometry("480x300")
         self.mode_dialog.resizable(False, False)
         self.mode_dialog.transient(self.root)
         self.mode_dialog.grab_set()
@@ -720,7 +797,7 @@ class SeewoLoginApp:
         self.mode_dialog.protocol("WM_DELETE_WINDOW", lambda: None)
         sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
-        self.mode_dialog.geometry(f"400x250+{sw//8}+{sh//8}")
+        self.mode_dialog.geometry(f"480x300+{sw//8}+{sh//8}")
 
         ttk.Label(self.mode_dialog,
                  text=f"科目 [{subject}] 登录方式",
@@ -859,8 +936,8 @@ class SeewoLoginApp:
 
         sw = self.op_window.winfo_screenwidth()
         sh = self.op_window.winfo_screenheight()
-        # 紧凑尺寸 & 位置（同手动浮窗：屏幕左1/4中心）
-        OW, OH = 280, 260
+        # 紧凑尺寸 & 位置（适配 3K 175% 缩放）
+        OW, OH = 440, 400
         px = max(0, min(int(sw * 0.25 - OW // 2), sw - OW))
         py = max(0, min(sh // 2 - OH // 2, sh - OH))
         self.op_window.geometry(f"{OW}x{OH}+{px}+{py}")
@@ -873,11 +950,11 @@ class SeewoLoginApp:
                  font=("SimHei", 11, "bold"), foreground="red").pack(pady=3)
 
         self.progress_var = tk.DoubleVar()
-        ttk.Progressbar(frame, variable=self.progress_var, maximum=100, length=250).pack(pady=5)
+        ttk.Progressbar(frame, variable=self.progress_var, maximum=100, length=320).pack(pady=5)
 
         ttk.Label(frame, text="操作步骤:", font=("SimHei", 9)).pack(anchor=tk.W)
 
-        self.step_text = tk.Text(frame, height=6, width=38, state=tk.DISABLED)
+        self.step_text = tk.Text(frame, height=8, width=44, state=tk.DISABLED)
         self.step_text.pack(pady=3)
 
         bf = ttk.Frame(frame); bf.pack(pady=3)
@@ -1133,11 +1210,13 @@ class SeewoLoginApp:
         self.float_window = self.mode_dialog = None
 
     # ────────────────────────────────────────────
-    # perform_login (now uses scheme coordinates)
+    # perform_login (now uses scheme coordinates + configurable wait times)
     # ────────────────────────────────────────────
     def perform_login(self, username, password):
         global debug_mode
         c = self._get_coords()
+        wait_launch = c.get("wait_launch", WAIT_LAUNCH_DEFAULT)
+        wait_op = c.get("wait_operation", WAIT_OPERATION_DEFAULT)
         try:
             self._update_overlay(0, False)
             if not debug_mode:
@@ -1167,11 +1246,12 @@ class SeewoLoginApp:
             elif not self._sleep_check(1): return
             self._update_overlay(2)
 
+            # 等待希沃加载 — 使用方案配置的启动等待时间
             self._update_overlay(3, False)
-            if not self._sleep_check(8.5): return
+            if not self._sleep_check(wait_launch): return
             self._update_overlay(3)
 
-            # ── 以下坐标均来自方案 ──
+            # ── 以下坐标均来自方案，操作之间使用配置的 wiat_operation 间隔 ──
             self._update_overlay(4, False)
             if not debug_mode:
                 pt = c["username_input"]
@@ -1179,7 +1259,8 @@ class SeewoLoginApp:
                 pyautogui.typewrite(username)
             else:
                 self.root.after(0, lambda: self._debug_show("账号", username))
-                if not self._sleep_check(1): return
+                if not self._sleep_check(wait_op): return
+            if not self._sleep_check(wait_op): return
             self._update_overlay(4)
 
             self._update_overlay(5, False)
@@ -1189,28 +1270,30 @@ class SeewoLoginApp:
                 pyautogui.typewrite(password)
             else:
                 self.root.after(0, lambda: self._debug_show("密码", "*" * len(password)))
-                if not self._sleep_check(1): return
+                if not self._sleep_check(wait_op): return
+            if not self._sleep_check(wait_op): return
             self._update_overlay(5)
 
             self._update_overlay(6, False)
             if not debug_mode:
                 pt = c["agreement_check"]
                 pyautogui.moveTo(pt["x"], pt["y"]); pyautogui.click()
-            if not self._sleep_check(0.2): return
+            if not self._sleep_check(wait_op): return
             self._update_overlay(6)
 
             self._update_overlay(7, False)
             if not debug_mode:
                 pt = c["login_confirm"]
                 pyautogui.moveTo(pt["x"], pt["y"]); pyautogui.click()
-            if not self._sleep_check(0.2): return
+            if not self._sleep_check(wait_op): return
             self._update_overlay(7)
 
             self._update_overlay(8, False)
             if not debug_mode:
                 pt = c["back_prepare"]
                 pyautogui.moveTo(pt["x"], pt["y"]); pyautogui.click()
-            elif not self._sleep_check(1): return
+            elif not self._sleep_check(wait_op): return
+            if not self._sleep_check(wait_op): return
             self._update_overlay(8)
 
             self._update_overlay(9)
